@@ -1,0 +1,1384 @@
+import json
+import random
+
+from django.contrib.auth import authenticate, logout
+from django.contrib.auth.hashers import check_password
+from django.contrib.auth.password_validation import validate_password
+from django.contrib.auth.tokens import default_token_generator
+from django.core.exceptions import ValidationError
+from django.core.mail import EmailMessage
+from django.http import JsonResponse, HttpResponseForbidden
+from django.shortcuts import render
+from django.template.loader import render_to_string
+from django.utils import timezone
+from django.utils.encoding import force_bytes, force_str
+from django.utils.http import urlsafe_base64_decode, urlsafe_base64_encode
+from django.db.models import Q
+from django.views.decorators.csrf import csrf_exempt
+from rest_framework.decorators import api_view, permission_classes
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
+from rest_framework_simplejwt.tokens import RefreshToken
+
+from root.permissions import RoleTimePermission
+from .models import Token, Utilisateur, RoleRestriction
+from fonction import token_required
+
+from entreprise.models import Entreprise
+
+from root.mailer import send
+from .serializers import UserRestrictionSerializer
+
+
+# Create your views here.
+# @csrf_exempt
+# def api_user_login(request):
+#     response_data = {'message': "requête invalide", 'etat': False}
+#
+#     if request.method == "POST":
+#         try:
+#             form = json.loads(request.body.decode("utf-8"))
+#         except json.JSONDecodeError:
+#             return JsonResponse({'message': "Erreur lors de la lecture des données JSON", 'etat': False})
+#
+#         # if "username" in form and "password" in form:
+#         #     username = form.get("username")
+#         #     password = form.get("password")
+#         #
+#         #     user = authenticate(request, username=username, password=password)
+#         #     if user is not None:
+#         #         # Supprimer le token existant (si présent) et en créer un nouveau
+#         #         Token.objects.filter(user=user).delete()
+#         #         token = Token.objects.create(user=user)
+#         #
+#         #         response_data["etat"] = True
+#         #         response_data["id"] = user.uuid
+#         #         response_data["token"] = str(token.token)
+#         #         response_data["message"] = "Connexion réussie"
+#         #     else:
+#         #         user = Utilisateur.objects.filter(username=username).first()
+#         #         if user is not None:
+#         #             response_data["message"] = "Utilisateur ou mot de passe incorrect"
+#         #         else:
+#         #             response_data["message"] = "Utilisateur ou mot de passe incorrect."
+#         # else:
+#         #     response_data["message"] = "Nom d'utilisateur ou mot de passe manquant"
+#         if "username" in form and "password" in form:
+#             login_input = form.get("username").strip()  # Peut être un numéro de téléphone ou un username
+#             password = form.get("password").strip()
+#
+#             # Tentez de trouver l'utilisateur par le nom d'utilisateur ou le téléphone
+#             user = Utilisateur.objects.filter(username=login_input).first() or \
+#                    Utilisateur.objects.filter(numero=login_input).first()
+#
+#             if user:
+#                 # Validez le mot de passe
+#                 if check_password(password, user.password):
+#                     # Authentifiez et créez un nouveau token
+#                     Token.objects.filter(user=user).delete()
+#                     token = Token.objects.create(user=user)
+#
+#                     response_data["etat"] = True
+#                     response_data["id"] = user.uuid
+#                     response_data["token"] = str(token.token)
+#                     response_data["message"] = "Connexion réussie"
+#                 else:
+#                     response_data["message"] = "Utilisateur ou mot de passe incorrect"
+#             else:
+#                 response_data["message"] = "Utilisateur introuvable"
+#         else:
+#             response_data["message"] = "Nom d'utilisateur ou mot de passe manquant"
+#     return JsonResponse(response_data)
+
+@csrf_exempt
+def api_user_login(request):
+    response_data = {'message': "requête invalide", 'etat': False}
+
+    if request.method == "POST":
+        try:
+            form = json.loads(request.body.decode("utf-8"))
+        except json.JSONDecodeError:
+            return JsonResponse({'message': "Erreur lors de la lecture des données JSON", 'etat': False})
+
+        if "username" in form and "password" in form:
+            login_input = form.get("username").strip()  # Peut être un numéro de téléphone ou un username
+            password = form.get("password").strip()
+
+            # Tente de trouver l'utilisateur par username ou par numéro
+            user = Utilisateur.objects.filter(username=login_input).first() or \
+                   Utilisateur.objects.filter(numero=login_input).first()
+
+            if user:
+
+                if check_password(password, user.password):
+                    # Supprime l'ancien token et en crée un nouveau
+                    Token.objects.filter(user=user).delete()
+                    token = Token.objects.create(user=user)
+
+                    # Met à jour la date de la dernière connexion
+                    user.last_login = timezone.now()
+                    user.save()
+
+                    response_data["etat"] = True
+                    response_data["id"] = user.uuid
+                    response_data["token"] = str(token.token)
+                    response_data["message"] = "Connexion réussie"
+                else:
+                    response_data["message"] = "Utilisateur ou mot de passe incorrect"
+            else:
+                response_data["message"] = "Utilisateur introuvable"
+        else:
+            response_data["message"] = "Nom d'utilisateur ou mot de passe manquant"
+    return JsonResponse(response_data)
+
+@csrf_exempt
+def api_user_register(request):
+    response_data = {'message': "Requête invalide", 'etat': False, 'id': ""}
+
+    if request.method == "POST":
+        try:
+            form = json.loads(request.body.decode("utf-8"))
+        except json.JSONDecodeError:
+            return JsonResponse(response_data)
+
+        required_fields = ["password", "first_name", "last_name", "email"]
+        if all(field in form for field in required_fields):
+            password = form.get("password")
+            first_name = form.get("first_name")
+            numero = form.get("numero")
+            pays = form.get("pays")
+            last_name = form.get("last_name")
+            email = form.get("email")
+
+            # Génération du nom d'utilisateur unique
+            base_username = f"{first_name[:2].lower()}0001{last_name[:2].lower()}"
+            username = base_username
+            counter = 1
+            while Utilisateur.objects.filter(username=username).exists():
+                counter += 1
+                username = f"{first_name[:2].lower()}{counter:04d}{last_name[:2].lower()}"
+
+            # Vérification de l'existence de l'email
+            if Utilisateur.objects.filter(email=email).exists():
+                response_data["message"] = "Cet email est déjà utilisé"
+            elif Utilisateur.objects.filter(numero=numero).exists():
+                response_data["message"] = "Cet numero est déjà utilisé"
+            else:
+                try:
+                    # Préparation de l'e-mail de confirmation
+                    html_text = render_to_string('mail.html', context={
+                        "sujet": "Inscription reçue sur Gest Stocks (Gestion de Stock)",
+                        "message": (
+                            f"Bonjour <b>{first_name} {last_name}</b>,<br><br>"
+                            "🎉 <b>Félicitations !</b> Votre inscription a bien été enregistrée.<br><br>"
+                            "Merci d'avoir choisi <b>Gest Stocks</b> pour la gestion de vos stocks.<br><br>"
+                            "Votre compte est actuellement en cours de vérification par notre équipe. "
+                            "Une fois validé, vous pourrez accéder à l’ensemble de nos services.<br><br>"
+                            "Nous vous remercions pour l’intérêt que vous portez à notre entreprise <b>(Diakite Digital)</b>. "
+                            "Votre inscription est en cours d’étude.<br><br>"
+                            f"🔐 <b>Votre nom d'utilisateur est :</b> <b>{username}</b><br><br>"
+                            "À très bientôt sur notre plateforme !<br><br>"
+                            "— L’équipe Diakite Digital"
+                        )
+                    })
+
+                    # Envoi de l'e-mail de confirmation
+                    email_sent = send(
+                        sujet="Inscription reçu sur Gest Stocks (Gestion de Stock)",
+                        message="",
+                        email_liste=[email],
+                        html_message=html_text,
+                    )
+
+                    if email_sent:
+                        # Création de l'utilisateur uniquement si l'e-mail est envoyé
+                        utilisateur = Utilisateur.objects.create_user(
+                            first_name=first_name,
+                            last_name=last_name,
+                            username=username,
+                            pays=pays,
+                            numero=numero,
+                            email=email,
+                            password=password
+                        )
+
+                        # Authentification de l'utilisateur
+                        new_utilisateur = authenticate(request, username=username, password=password)
+                        if new_utilisateur is not None:
+                            response_data["etat"] = True
+                            response_data["id"] = utilisateur.id
+                            response_data["message"] = "Utilisateur créé et authentifié avec succès"
+                        else:
+                            response_data["message"] = "Échec de l'authentification après création"
+                    else:
+                        response_data[
+                            "message"] = "Échec de l'envoi de l'e-mail, verifier votre connexion. Inscription annulée."
+                except Exception as e:
+                    response_data["message"] = f"Erreur lors du traitement : {str(e)}"
+        else:
+            response_data["message"] = "Tous les champs obligatoires ne sont pas fournis"
+
+    return JsonResponse(response_data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_user_admin_register(request):
+    response_data = {'message': "requête invalide", 'etat': False, 'id': ""}
+
+    if request.method == "POST":
+        try:
+            form = json.loads(request.body.decode("utf-8"))
+        except json.JSONDecodeError:
+            return JsonResponse(response_data)
+
+        required_fields = ["password", "first_name", "last_name", "email_user", "entreprise_id"]
+        if all(field in form for field in required_fields):
+            password = form.get("password")
+            first_name = form.get("first_name")
+            numero = form.get("numero")
+            role = form.get("role")
+            last_name = form.get("last_name")
+            email_user = form.get("email_user")
+            entreprise_id = form.get("entreprise_id")
+
+            admin_user = request.user  # L'administrateur en cours
+            created_users_count = Utilisateur.objects.filter(created_by=admin_user).count()
+
+            if created_users_count >= 5:
+                response_data["message"] = "Vous avez atteint la limite de 5 utilisateurs créés."
+                return JsonResponse(response_data)
+
+            if entreprise_id:
+                # user_from_data_base.travail = travail
+                entreprise = Entreprise.objects.get(uuid=entreprise_id)
+            else:
+                response_data["message"] = "Entreprise non selectionner"
+
+            # Vérification de l'existence de l'utilisateur avec le même username ou email
+
+            if Utilisateur.objects.filter(email_user=email_user).exists():
+                response_data["message"] = "cet email est déjà utilisé"
+            else:
+                # Génération du nom d'utilisateur unique
+                base_username = f"{first_name[:2].lower()}0001{last_name[:2].lower()}"
+                username = base_username
+                counter = 1
+                while Utilisateur.objects.filter(username=username).exists():
+                    counter += 1
+                    username = f"{first_name[:2].lower()}{counter:04d}{last_name[:2].lower()}"
+
+                try:
+                    # Préparation de l'e-mail de confirmation
+                    html_text = render_to_string('mail.html', context={
+                        "sujet": "Inscription reçue sur Gest Stocks (Gestion de Stock)",
+                        "message": (
+                            f"Bonjour <b>{first_name} {last_name}</b>,<br><br>"
+                            "🎉 <b>Félicitations !</b> Votre inscription a bien été enregistrée.<br><br>"
+                            "Merci d'avoir choisi <b>Gest Stocks</b> pour la gestion de vos stocks.<br><br>"
+                            "Votre compte est actuellement en cours de vérification par notre équipe. "
+                            "Une fois validé, vous pourrez accéder à l’ensemble de nos services.<br><br>"
+                            "Nous vous remercions pour l’intérêt que vous portez à notre entreprise <b>(Diakite Digital)</b>. "
+                            "Votre inscription est en cours d’étude.<br><br>"
+                            f"🔐 <b>Votre nom d'utilisateur est :</b> <b>{username}</b><br><br>"
+                            "À très bientôt sur notre plateforme !<br><br>"
+                            "— L’équipe Diakite Digital"
+                        )
+                    })
+
+                    # Envoi de l'e-mail de confirmation
+                    email_sent = send(
+                        sujet="Inscription reçu chez Diakite Digital",
+                        message="",
+                        email_liste=[request.user.email],
+                        html_message=html_text,
+                    )
+
+                    if email_sent:
+
+                        # Création de l'utilisateur avec le champ created_by
+                        new_user = Utilisateur.objects.create_user(
+                            first_name=first_name,
+                            last_name=last_name,
+                            username=username,
+                            numero=numero,
+                            role=role,
+                            email_user=email_user,
+                            password=password,
+                            created_by=request.user  # L'administrateur qui a créé l'utilisateur
+                        )
+                        Utilisateur.objects.filter(username=username).first().entreprises.add(entreprise)
+                        # Authentification de l'utilisateur
+                        if new_user is not None:
+                            response_data["etat"] = True
+                            response_data["id"] = new_user.id
+                            response_data["message"] = "success"
+                        else:
+                            response_data["message"] = "Échec de la création"
+                    else:
+                        response_data[
+                            "message"] = "Échec de l'envoi de l'e-mail, verifier votre connexion. Inscription annulée."
+                except Exception as e:
+                    response_data["message"] = f"Erreur lors du traitement : {str(e)}"
+
+    return JsonResponse(response_data)
+
+
+class UserAdminRegisterView(APIView):
+
+    def post(self, request):
+        response_data = {'message': "requête invalide", 'etat': False, 'id': ""}
+
+        form = request.data  # DRF gère déjà JSON
+
+        required_fields = ["password", "first_name", "last_name", "email_user", "entreprise_id"]
+        if not all(field in form for field in required_fields):
+            return Response(response_data)
+
+        password = form.get("password")
+        first_name = form.get("first_name")
+        numero = form.get("numero")
+        role = form.get("role")
+        last_name = form.get("last_name")
+        email_user = form.get("email_user")
+        entreprise_id = form.get("entreprise_id")
+
+        admin_user = request.user
+        created_users_count = Utilisateur.objects.filter(created_by=admin_user).count()
+
+        if created_users_count >= 5:
+            response_data["message"] = "Vous avez atteint la limite de 5 utilisateurs créés."
+            return Response(response_data)
+
+        try:
+            entreprise = Entreprise.objects.get(uuid=entreprise_id)
+        except Entreprise.DoesNotExist:
+            response_data["message"] = "Entreprise non sélectionnée ou inexistante"
+            return Response(response_data)
+
+        if Utilisateur.objects.filter(email_user=email_user).exists():
+            response_data["message"] = "Cet email est déjà utilisé"
+            return Response(response_data)
+
+        # Génération du nom d'utilisateur unique
+        base_username = f"{first_name[:2].lower()}0001{last_name[:2].lower()}"
+        username = base_username
+        counter = 1
+        while Utilisateur.objects.filter(username=username).exists():
+            counter += 1
+            username = f"{first_name[:2].lower()}{counter:04d}{last_name[:2].lower()}"
+
+        try:
+            # Préparation e-mail
+            html_text = render_to_string('mail.html', context={
+                "sujet": "Inscription reçue sur Gest Stocks (Gestion de Stock)",
+                "message": (
+                    f"Bonjour <b>{first_name} {last_name}</b>,<br><br>"
+                    "🎉 <b>Félicitations !</b> Votre inscription a bien été enregistrée.<br><br>"
+                    f"🔐 <b>Votre nom d'utilisateur est :</b> <b>{username}</b><br><br>"
+                    "— L’équipe Diakite Digital"
+                )
+            })
+
+            email_sent = send(
+                sujet="Inscription reçue chez Diakite Digital",
+                message="",
+                email_liste=[request.user.email],
+                html_message=html_text,
+            )
+
+            if not email_sent:
+                response_data["message"] = "Échec de l'envoi de l'e-mail."
+                return Response(response_data)
+
+            # Création de l’utilisateur
+            new_user = Utilisateur.objects.create_user(
+                first_name=first_name,
+                last_name=last_name,
+                username=username,
+                numero=numero,
+                role=role,
+                email_user=email_user,
+                password=password,
+                created_by=admin_user
+            )
+            new_user.entreprises.add(entreprise)
+
+            response_data["etat"] = True
+            response_data["id"] = new_user.id
+            response_data["message"] = "success"
+            return Response(response_data)
+
+        except Exception as e:
+            response_data["message"] = f"Erreur lors du traitement : {str(e)}"
+            return Response(response_data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_user_cabinet_register(request):
+    response_data = {'message': "requête invalide", 'etat': False, 'id': ""}
+
+    if request.method == "POST":
+        try:
+            form = json.loads(request.body.decode("utf-8"))
+        except json.JSONDecodeError:
+            return JsonResponse(response_data)
+
+        required_fields = ["password", "first_name", "last_name", "email"]
+        if all(field in form for field in required_fields):
+
+            password = form.get("password")
+            first_name = form.get("first_name")
+            numero = form.get("numero")
+            role = form.get("role")
+            last_name = form.get("last_name")
+            email_user = form.get("email")
+
+            admin_user = request.user  # L'administrateur en cours
+            created_users_count = Utilisateur.objects.filter(created_by=admin_user).count()
+
+            if created_users_count >= 20:
+                response_data["message"] = "Vous avez atteint la limite de 20 utilisateurs créés."
+                return JsonResponse(response_data)
+
+            # Vérification de l'existence de l'utilisateur avec le même username ou email
+
+            if Utilisateur.objects.filter(email=email_user).exists():
+                response_data["message"] = "cet email est deja utilise"
+            else:
+                # Génération du nom d'utilisateur unique
+                base_username = f"{first_name[:2].lower()}0001{last_name[:2].lower()}"
+                username = base_username
+                counter = 1
+                while Utilisateur.objects.filter(username=username).exists():
+                    counter += 1
+                    username = f"{first_name[:2].lower()}{counter:04d}{last_name[:2].lower()}"
+
+                try:
+                    # Préparation de l'e-mail de confirmation
+                    html_text = render_to_string('mail.html', context={
+                        "sujet": "Inscription reçue sur Gest Stocks (Gestion de Stock)",
+                        "message": (
+                            f"Bonjour <b>{first_name} {last_name}</b>,<br><br>"
+                            "🎉 <b>Félicitations !</b> Votre inscription a bien été enregistrée.<br><br>"
+                            "Merci d'avoir choisi <b>Gest Stocks</b> pour la gestion de vos stocks.<br><br>"
+                            "Votre compte est actuellement en cours de vérification par notre équipe. "
+                            "Une fois validé, vous pourrez accéder à l’ensemble de nos services.<br><br>"
+                            "Nous vous remercions pour l’intérêt que vous portez à notre entreprise <b>(Diakite Digital)</b>. "
+                            "Votre inscription est en cours d’étude.<br><br>"
+                            f"🔐 <b>Votre nom d'utilisateur est :</b> <b>{username}</b><br><br>"
+                            "À très bientôt sur notre plateforme !<br><br>"
+                            "— L’équipe Diakite Digital"
+                        )
+                    })
+
+                    # Envoi de l'e-mail de confirmation
+                    email_sent = send(
+                        sujet="Inscription reçu chez Diakite Digital",
+                        message="",
+                        email_liste=[request.user.email],
+                        html_message=html_text,
+                    )
+
+                    if email_sent:
+
+                        # Création de l'utilisateur avec le champ created_by
+                        new_user = Utilisateur.objects.create_user(
+                            first_name=first_name,
+                            last_name=last_name,
+                            username=username,
+                            numero=numero,
+                            role=role,
+                            email=email_user,
+                            password=password,
+                            created_cab=request.user  # L'administrateur qui a créé l'utilisateur
+                        )
+                        # Authentification de l'utilisateur
+                        if new_user is not None:
+                            response_data["etat"] = True
+                            response_data["id"] = new_user.id
+                            response_data["message"] = "success"
+                        else:
+                            response_data["message"] = "Échec de la création"
+                    else:
+                        response_data[
+                            "message"] = "Échec de l'envoi de l'e-mail, verifier votre connexion. Inscription annulée."
+                except Exception as e:
+                    response_data["message"] = f"Erreur lors du traitement : {str(e)}"
+
+    return JsonResponse(response_data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated, RoleTimePermission])
+def api_user_set_profil(request):
+    response_data = {'message': "requette invalide", 'etat': False}
+
+    if request.method == "POST":
+        form = list()
+        try:
+            form = json.loads(request.body.decode("utf-8"))
+        except:
+            ...
+
+        user_all = Utilisateur.objects.all()
+        user_id = form.get("user_id")
+
+        user_conect = request.user
+
+        modifier = False
+        if user_conect:
+
+            if (user_conect.groups.filter(name="Admin").exists()
+                    or user_conect.groups.filter(name="Editor").exists()
+                    or user_conect.groups.filter(name="Visitor").exists()):
+                # if user_conect.has_perm('entreprise.change_utilisateur'):
+                id = form.get("uuid")
+
+                user_from_data_base = user_all.filter(uuid=id).first()
+                if user_from_data_base:
+
+                    first_name = form.get("first_name")
+                    if first_name:
+                        user_from_data_base.first_name = first_name
+                        modifier = True
+
+                        # user_from_data_base.save()
+
+                    last_name = form.get("last_name")
+                    if last_name:
+                        user_from_data_base.last_name = last_name
+                        modifier = True
+
+                    role = form.get("role")
+                    if role:
+                        user_from_data_base.role = role
+                        modifier = True
+
+                    typeRole = form.get("typeRole")
+                    if typeRole:
+                        user_from_data_base.typeRole = typeRole
+                        modifier = True
+
+                    # is_cabinet = form.get("is_cabinet")
+                    # if is_cabinet:
+                    #     user_from_data_base.is_cabinet = is_cabinet
+                    #     modifier = True
+
+                    if "is_cabinet" in form:
+                        user_from_data_base.is_cabinet = form["is_cabinet"]
+                        modifier = True
+
+                    pays = form.get("pays")
+                    if role:
+                        user_from_data_base.pays = pays
+                        modifier = True
+
+                    if "mail_verifier" in form:
+                        user_from_data_base.mail_verifier = True
+                        modifier = True
+
+                    entreprise_id = form.get("entreprise_id")
+                    if entreprise_id:
+                        # user_from_data_base.travail = travail
+                        entreprise = Entreprise.objects.get(uuid=entreprise_id)
+                        user_from_data_base.entreprises.add(entreprise)  # Ajout de la entreprise à l'utilisateur
+                        modifier = True
+
+                    numero = form.get("numero")
+                    if numero:
+
+                        if user_from_data_base.numero != numero:
+                            tmp_user = user_all.filter(numero=numero).first()
+                            tmp_user1 = user_all.filter(username=numero).first()
+                            if tmp_user or tmp_user1:
+                                response_data["etat"] = False
+                                response_data["message"] = "ce numéro est déjà utilisé"
+                            else:
+                                user_from_data_base.numero = numero
+                                modifier = True
+                        else:
+                            response_data["message"] = "ce numéro est déjà utilisé"
+
+                    email = form.get("email")
+                    if email:
+
+                        if user_from_data_base.email != email:
+                            tmp_user = user_all.filter(email=email).first()
+                            tmp_user1 = user_all.filter(username=email).first()
+
+                            if tmp_user or tmp_user1:
+                                response_data["etat"] = False
+                                response_data["message"] = "cet email est déjà utilisé"
+                            else:
+                                user_from_data_base.email = email
+                                modifier = True
+                        else:
+                            response_data["message"] = "cet email est déjà utilisé"
+
+                    username = form.get("username")
+                    if username:
+
+                        if user_from_data_base.username != username:
+                            tmp_user = user_all.filter(username=username).first()
+                            tmp_user1 = user_all.filter(numero=username).first()
+
+                            utiliser = False
+
+                            if tmp_user or tmp_user1 or utiliser:
+                                response_data["etat"] = False
+                                response_data["message"] = "ce nom d'utilisateur est déjà utilisé"
+                                # print(context)
+
+                            else:
+                                user_from_data_base.username = username
+                                modifier = True
+                        else:
+                            response_data["message"] = "ce nom d'utilisateur est déjà utilisé"
+
+                    if "new_password" in form and "old_password" in form:
+                        new_password = form.get("new_password")
+                        old_password = form.get("old_password")
+                        username = user_from_data_base.username
+
+                        user = authenticate(request, username=username, password=old_password)
+                        if user:
+                            user_from_data_base.set_password(new_password)
+                            modifier = True
+
+                        else:
+                            response_data["etat"] = False
+                            response_data["message"] = "Mot de passe incorrect"
+
+                    password = form.get("password")
+                    repassword = form.get("repassword")
+                    if password and repassword:
+                        if password == repassword:
+
+                            # Validation du mot de passe
+                            # validate_password(password, user_from_data_base)
+                            user_from_data_base.set_password(password)
+                            modifier = True
+                            # user.save()
+
+                        else:
+                            response_data['message'] = "Les deux mots de passe ne correspondent pas"
+                    else:
+                        response_data['message'] = "Les champs de mot de passe sont requis"
+
+                    if modifier:
+                        user_from_data_base.save()
+                        response_data["etat"] = True
+                        response_data["message"] = "success"
+                    else:
+                        ...
+                    # TODO requette invalide
+
+                else:
+                    # L'utilisateur n'a pas la permission d'ajouter une catégorie
+                    response_data["message"] = "Utilisateur non trouvé. ???"
+            else:
+                # L'utilisateur n'a pas la permission d'ajouter une catégorie
+                response_data["message"] = "Vous n'avez pas la permission."
+        else:
+            response_data["message"] = "Utilisateur non trouvé."
+
+    else:
+        response_data["etat"] = False
+        response_data["message"] = "requette invalide"
+
+    return JsonResponse(response_data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def user_restriction(request):
+    user = request.user
+
+    try:
+        restriction = user.restriction
+    except RoleRestriction.DoesNotExist:
+        return Response({
+            "day_start": 0,
+            "day_end": 4,
+            "hour_start": "08:00",
+            "hour_end": "18:00",
+            "active": False
+        })
+
+    serializer = UserRestrictionSerializer(restriction)
+    return Response(serializer.data)
+
+
+@api_view(["GET", "POST"])
+@permission_classes([IsAuthenticated])
+def user_restriction_detail(request, uuid):
+    try:
+        target_user = Utilisateur.objects.get(uuid=uuid)
+    except Utilisateur.DoesNotExist:
+        return Response({"message": "Utilisateur non trouvé"}, status=404)
+
+    # Check permissions (e.g., only admin or owner can edit)
+    # For now, assuming IsAuthenticated is enough or adding basic check
+    # if not request.user.is_staff and request.user != target_user: # Example check
+    #     return Response({"message": "Non autorisé"}, status=403)
+
+    if request.method == "GET":
+        try:
+            restriction = target_user.restriction
+            serializer = UserRestrictionSerializer(restriction)
+            return Response(serializer.data)
+        except RoleRestriction.DoesNotExist:
+            return Response({"active": False})
+
+    elif request.method == "POST":
+        try:
+            defaults = {
+                "day_start": 0,
+                "day_end": 4,
+                "hour_start": "08:00",
+                "hour_end": "18:00",
+                "active": False
+            }
+            restriction, created = RoleRestriction.objects.get_or_create(
+                user=target_user,
+                defaults=defaults
+            )
+            serializer = UserRestrictionSerializer(restriction, data=request.data, partial=True)
+            if serializer.is_valid():
+                serializer.save()
+                return Response(serializer.data)
+            return Response(serializer.errors, status=400)
+        except Exception as e:
+            return Response({"message": str(e)}, status=500)
+
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def del_user(request):
+    response_data = {'message': "requête invalide", 'etat': False}
+
+    try:
+        form = json.loads(request.body.decode("utf-8"))
+    except Exception:
+        return JsonResponse({'message': "Erreur lors de la lecture des données JSON", 'etat': False})
+
+    id = form.get("uuid")
+    slug = form.get("slug")
+    user_id = form.get("user_id")
+
+    # Vérifier si l'utilisateur qui fait l'action existe
+    user = Utilisateur.objects.filter(uuid=user_id).first()
+    if not user:
+        response_data["message"] = "Utilisateur non trouvé."
+        return JsonResponse(response_data)
+
+    # Vérifier que l'utilisateur est admin
+    if not user.groups.filter(name="Admin").exists():
+        response_data["message"] = "Vous n'avez pas la permission de supprimer un utilisateur."
+        return JsonResponse(response_data)
+
+    # Trouver l’utilisateur à supprimer
+    if id:
+        target_user = Utilisateur.objects.filter(uuid=id).first()
+    else:
+        target_user = Utilisateur.objects.filter(slug=slug).first()
+
+    if not target_user:
+        response_data["message"] = "Utilisateur à supprimer non trouvé."
+        return JsonResponse(response_data)
+
+    # Vérifier s’il est lié à une entreprise
+    if target_user.entreprises.exists():
+        response_data["message"] = "Impossible de supprimer cet utilisateur car il est rattaché à une entreprise."
+        return JsonResponse(response_data)
+
+    # Si tout est bon → suppression
+    target_user.delete()
+    response_data["etat"] = True
+    response_data["message"] = "Utilisateur supprimé with succès."
+    return JsonResponse(response_data)
+
+
+class GoogleLoginView(APIView):
+    permission_classes = []
+
+    def post(self, request):
+        token = request.data.get('token')
+        if not token:
+            return Response({'message': 'Token missing', 'etat': False}, status=400)
+
+        try:
+            # Specify the CLIENT_ID of the app that accesses the backend:
+            # idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), CLIENT_ID)
+            # For now, we'll verify without CLIENT_ID check if we don't have it yet, 
+            # but ideally it should be checked.
+            idinfo = id_token.verify_oauth2_token(token, google_requests.Request())
+
+            if idinfo['iss'] not in ['accounts.google.com', 'https://accounts.google.com']:
+                raise ValueError('Wrong issuer.')
+
+            # ID token is valid. Get the user's Google Account ID from the decoded token.
+            email = idinfo['email']
+            first_name = idinfo.get('given_name', '')
+            last_name = idinfo.get('family_name', '')
+
+            user = Utilisateur.objects.filter(email=email).first()
+
+            if not user:
+                # Create user if it doesn't exist
+                # Generate unique username
+                base_username = f"{first_name[:2].lower()}0001{last_name[:2].lower()}"
+                username = base_username
+                counter = 1
+                while Utilisateur.objects.filter(username=username).exists():
+                    counter += 1
+                    username = f"{first_name[:2].lower()}{counter:04d}{last_name[:2].lower()}"
+                
+                # Generate a unique dummy number since it's required by the model
+                numero = f"GOOGLE_{idinfo['sub'][:10]}"
+                while Utilisateur.objects.filter(numero=numero).exists():
+                    numero = f"GOOGLE_{idinfo['sub'][:10]}_{random.getrandbits(16)}"
+
+                user = Utilisateur.objects.create_user(
+                    username=username,
+                    email=email,
+                    first_name=first_name,
+                    last_name=last_name,
+                    numero=numero,
+                    password=Utilisateur.objects.make_random_password()
+                )
+
+            # Generate tokens
+            refresh = RefreshToken.for_user(user)
+            return Response({
+                'etat': True,
+                'message': 'Connexion réussie',
+                'id': str(user.uuid),
+                'access': str(refresh.access_token),
+                'refresh': str(refresh),
+            })
+
+        except ValueError as e:
+            return Response({'message': f'Invalid token: {str(e)}', 'etat': False}, status=400)
+        except Exception as e:
+            return Response({'message': str(e), 'etat': False}, status=500)
+
+@csrf_exempt
+def api_update_password(request):
+    response_data = {'etat': False, 'message': "Requête invalide"}
+
+    if request.method == "POST":
+        try:
+            form = json.loads(request.body.decode("utf-8"))
+        except json.JSONDecodeError:
+            response_data['message'] = "Erreur lors de la lecture des données JSON"
+            return JsonResponse(response_data)
+
+        uidb64 = form.get("uid")
+        token = form.get("token")
+        password = form.get("password")
+        repassword = form.get("repassword")
+
+        if not uidb64 or not token:
+            response_data['message'] = "Token ou UID manquant"
+            return JsonResponse(response_data, status=400)
+
+        # Décoder l'UID
+        try:
+            user_id = force_str(urlsafe_base64_decode(uidb64))
+            user = Utilisateur.objects.get(id=user_id)
+        except (TypeError, ValueError, OverflowError, Utilisateur.DoesNotExist) as e:
+            response_data['message'] = "Utilisateur introuvable ou UID invalide"
+            return JsonResponse(response_data, status=403)
+
+        # Vérifier la validité du token
+        if not default_token_generator.check_token(user, token):
+            response_data['message'] = "Token invalide ou a expiré"
+            return JsonResponse(response_data, status=403)
+
+        # Vérification des mots de passe
+        if password and repassword:
+            if password == repassword:
+                if len(password) >= 6:
+                    try:
+                        # Validation du mot de passe
+                        validate_password(password, user)
+                        user.set_password(password)
+                        user.save()
+
+                        response_data['etat'] = True
+                        response_data['message'] = "Votre mot de passe a été modifié avec succès"
+                    except ValidationError as e:
+                        response_data['message'] = str(e)
+                else:
+                    response_data['message'] = "Le mot de passe doit contenir au moins 6 caractères"
+            else:
+                response_data['message'] = "Les deux mots de passe ne correspondent pas"
+        else:
+            response_data['message'] = "Les champs de mot de passe sont requis"
+
+    return JsonResponse(response_data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_user_all(request, uuid):
+    try:
+        us = request.user
+        # Récupérer l'utilisateur avec l'ID donné
+        # utilisateur = Utilisateur.objects.filter(uuid=uuid).first()
+
+        if us and us.is_superuser:
+            # Filtrer les utilisateurs sans `created_by`
+            all_use = Utilisateur.objects.filter(created_by__isnull=True)
+
+            utilisateurs_data = [
+                {
+                    "avatar": user.avatar.url if user.avatar else None,
+                    "role": user.role,
+                    "id": user.id,
+                    "uuid": user.uuid,
+                    "username": user.username,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "email": user.email,
+                    "is_admin": user.is_admin,
+                    "is_cabinet": user.is_cabinet,
+                    "is_superuser": user.is_superuser,
+                    "numero": user.numero,
+                }
+                for user in all_use
+            ]
+
+            response_data = {
+                "etat": True,
+                "message": "Utilisateurs récupérés avec succès",
+                "donnee": utilisateurs_data
+            }
+        else:
+            response_data = {
+                "etat": False,
+                "message": "Utilisateur non trouvé ou non autorisé"
+            }
+    except Utilisateur.DoesNotExist:
+        response_data = {
+            "etat": False,
+            "message": "Utilisateur non trouvé"
+        }
+
+    return JsonResponse(response_data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_mes_user_all(request, uuid):
+    try:
+        # Récupérer l'utilisateur avec l'ID donné
+        utilisateur = Utilisateur.objects.filter(uuid=uuid).first()
+
+        if utilisateur and utilisateur.is_cabinet:
+            # Filtrer les utilisateurs sans `created_by`
+            all_use = Utilisateur.objects.filter(created_cab__isnull=False)
+
+            utilisateurs_data = [
+                {
+                    "avatar": user.avatar.url if user.avatar else None,
+                    "role": user.role,
+                    "id": user.id,
+                    "uuid": user.uuid,
+                    "username": user.username,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "email": user.email,
+                    "is_admin": user.is_admin,
+                    "is_cabinet": user.is_cabinet,
+                    "is_superuser": user.is_superuser,
+                    "numero": user.numero,
+                }
+                for user in all_use
+            ]
+
+            response_data = {
+                "etat": True,
+                "message": "Utilisateurs récupérés avec succès",
+                "donnee": utilisateurs_data
+            }
+        else:
+            response_data = {
+                "etat": False,
+                "message": "Utilisateur non trouvé ou non autorisé"
+            }
+    except Utilisateur.DoesNotExist:
+        response_data = {
+            "etat": False,
+            "message": "Utilisateur non trouvé"
+        }
+
+    return JsonResponse(response_data)
+
+
+# @csrf_exempt
+# @token_required
+# def api_user_get(request):
+#     response_data = {'message': "requête invalide", 'etat': False}
+#
+#     if request.method == "POST":
+#         try:
+#             form = json.loads(request.body.decode("utf-8"))
+#         except json.JSONDecodeError:
+#             return JsonResponse(response_data)
+#
+#         filter_applied = False
+#         all_utilisateur = list()
+#         all_user = Utilisateur.objects.all()
+#
+#         user_id = form.get("user_id")
+#         user = Utilisateur.objects.filter(uuid=user_id).first()
+#
+#         # Récupérer l'utilisateur connecté
+#         current_user = request.user
+#
+#         # Filtrer uniquement les utilisateurs créés par l'administrateur connecté
+#         if current_user.groups.filter(name="Admin").exists():
+#         # if current_user.is_superuser:
+#             all_use = all_user.filter(created_by=current_user)
+#             if all_use:
+#                 all_user = all_use
+#             else:
+#                 all_user = Utilisateur.objects.filter(uuid=user_id)
+#
+#         if user:
+#             # if user.has_perm('entreprise.view_utilisateur'):
+#             if user.groups.filter(name="Admin").exists():
+#                 if "all" in form:
+#                     all_utilisateur = all_user
+#                     filter_applied = True
+#
+#                 elif "id" in form:
+#                     id = form.get("id")
+#                     all_utilisateur = all_user.filter(id=id)
+#                     filter_applied = True
+#
+#                 elif "role" in form:
+#                     role = form.get("role")
+#                     all_utilisateur = all_user.filter(role=role)
+#                     filter_applied = True
+#
+#                 if filter_applied:
+#                     utilisateurs = list()
+#                     for c in all_utilisateur:
+#                         utilisateurs.append(
+#                             {
+#                                 "avatar": c.avatar.url if user.avatar else None,
+#                                 "role": c.role,
+#                                 "uuid": c.uuid,
+#                                 "username": c.username,
+#                                 "user_id": c.id,
+#                                 "first_name": c.first_name,
+#                                 "last_name": c.last_name,
+#                                 "email": c.email,
+#                                 "is_admin": user.is_admin,
+#                                 "is_superuser": user.is_superuser,
+#                                 "numero": c.numero,
+#                             }
+#                             # for user in all_utilisateur
+#                         )
+#
+#                     if utilisateurs:
+#                         response_data['etat'] = True
+#                         response_data['message'] = "success"
+#                         response_data['donnee'] = utilisateurs
+#                     else:
+#                         response_data["etat"] = False
+#                         response_data["message"] = "vide"
+#             else:
+#                 response_data["message"] = "Vous n'avez pas la permission de voir les utilisateurs."
+#         else:
+#             response_data["message"] = "Utilisateur non trouvé."
+#
+#     return JsonResponse(response_data)
+
+@api_view(["POST"])
+@permission_classes([IsAuthenticated])
+def api_user_get(request):
+    response_data = {'message': "Requête invalide", 'etat': False}
+
+    if request.method == "POST":
+        try:
+            form = json.loads(request.body.decode("utf-8"))
+        except json.JSONDecodeError:
+            return JsonResponse(response_data)
+
+        filter_applied = False
+        all_utilisateur = list()
+        all_user = Utilisateur.objects.all()
+
+        user_id = form.get("user_id")
+        entreprise_uuid = form.get("entreprise_id")
+        user = Utilisateur.objects.filter(uuid=user_id).first()
+
+        # Récupérer l'utilisateur connecté
+        current_user = request.user
+
+        # Filtrer uniquement les utilisateurs créés par l'administrateur connecté, y compris lui-même
+        if current_user.groups.filter(name="Admin").exists():
+            all_user = all_user.filter(Q(created_by=current_user) | Q(id=current_user.id))
+
+        if user:
+            # Vérifier les permissions de l'utilisateur
+            if user.groups.filter(name="Admin").exists():
+                if entreprise_uuid:
+                    # Filtrer les utilisateurs par entreprise
+                    entreprise = Entreprise.objects.filter(uuid=entreprise_uuid).first()
+                    if entreprise:
+                        all_utilisateur = all_user.filter(entreprises=entreprise)
+                        filter_applied = True
+                    else:
+                        response_data["message"] = "Entreprise non trouvée."
+                        return JsonResponse(response_data)
+
+                elif "id" in form:
+                    id = form.get("id")
+                    all_utilisateur = all_user.filter(id=id)
+                    filter_applied = True
+
+                elif "role" in form:
+                    role = form.get("role")
+                    all_utilisateur = all_user.filter(role=role)
+                    filter_applied = True
+
+                if filter_applied:
+                    utilisateurs = list()
+                    for c in all_utilisateur:
+                        utilisateurs.append(
+                            {
+                                "avatar": c.avatar.url if c.avatar else None,
+                                "role": c.role,
+                                "uuid": c.uuid,
+                                "username": c.username,
+                                "user_id": c.id,
+                                "first_name": c.first_name,
+                                "last_name": c.last_name,
+                                "email": c.email,
+                                "email_user": c.email_user,
+                                "is_admin": c.is_admin,
+                                "is_superuser": c.is_superuser,
+                                "numero": c.numero,
+                            }
+                        )
+
+                    if utilisateurs:
+                        response_data['etat'] = True
+                        response_data['message'] = "Succès"
+                        response_data['donnee'] = utilisateurs
+                    else:
+                        response_data["etat"] = False
+                        response_data["message"] = "Aucun utilisateur trouvé."
+            else:
+                response_data["message"] = "Vous n'avez pas la permission de voir les utilisateurs."
+        else:
+            response_data["message"] = "Utilisateur non trouvé."
+
+    return JsonResponse(response_data)
+
+
+@api_view(["GET"])
+@permission_classes([IsAuthenticated])
+def api_user_get_profil(request, uuid):
+    message = "requette invalide"
+    donnee = dict()
+    etat = False
+
+    user_form_data_base = Utilisateur.objects.all().filter(uuid=uuid).first()
+
+    if user_form_data_base:
+
+        donnee["first_name"] = user_form_data_base.first_name
+        donnee["uuid"] = user_form_data_base.uuid
+        donnee["email"] = user_form_data_base.email
+        donnee["email_user"] = user_form_data_base.email_user
+        donnee["role"] = user_form_data_base.role
+        donnee["numero"] = user_form_data_base.numero
+        donnee["pays"] = user_form_data_base.pays
+        donnee["last_name"] = user_form_data_base.last_name
+        donnee["username"] = user_form_data_base.username
+        donnee["is_admin"] = user_form_data_base.is_admin
+        donnee["is_cabinet"] = user_form_data_base.is_cabinet
+        donnee["is_superuser"] = user_form_data_base.is_superuser
+
+        if user_form_data_base.avatar:
+            donnee["avatar"] = user_form_data_base.avatar.url
+        else:
+            donnee["avatar"] = None
+
+        donnee["role"] = user_form_data_base.role
+        donnee["numero"] = user_form_data_base.numero
+
+        donnee["email"] = user_form_data_base.email
+
+        etat = True
+        message = "success"
+    else:
+        message = "utilisateur non trouvé"
+
+    response_data = {'message': message, 'etat': etat, "donnee": donnee}
+    return JsonResponse(response_data)
+
+
+@csrf_exempt
+def api_forgot_password(request):
+    response_data = {'message': "Requête invalide", 'etat': False}
+
+    if request.method == "POST":
+        try:
+            data = json.loads(request.body.decode("utf-8"))
+        except json.JSONDecodeError:
+            response_data['message'] = "Erreur dans le format des données"
+            return JsonResponse(response_data)
+
+        email = data.get("email")
+
+        if not email:
+            response_data['message'] = "L'e-mail est requis"
+            return JsonResponse(response_data)
+
+        user = Utilisateur.objects.filter(email=email).first()
+
+        # Sécurité : Toujours renvoyer un succès vague pour éviter l'énumération des mails
+        response_data['message'] = "Si cette adresse est associée à un compte, un e-mail de réinitialisation a été envoyé."
+        response_data['etat'] = True
+
+        if user:
+            token = default_token_generator.make_token(user)
+            uid = urlsafe_base64_encode(force_bytes(user.id))
+
+            # Récupérer l'origine du frontend (ex: http://localhost:3000)
+            origin = request.META.get("HTTP_ORIGIN")
+            if not origin:
+                # Fallback au cas où HTTP_ORIGIN n'est pas fourni
+                current_site = request.get_host()
+                origin = f"{request.scheme}://{current_site}"
+
+            context = {
+                "token": token,
+                "uid": uid,
+                "domaine": origin
+            }
+
+            html_message = render_to_string("email.html", context)
+
+            try:
+                msg = EmailMessage(
+                    subject="Réinitialisation de mot de passe",
+                    body=html_message,
+                    from_email="DiakiteDigital <info@diakitedigital.com>",
+                    to=[user.email],
+                )
+                msg.content_subtype = "html"  # Important pour envoyer en HTML
+                msg.send(fail_silently=False)
+            except Exception as e:
+                # Log l'erreur côté serveur silencieusement sans exposer l'exception dans response_data
+                import logging
+                logger = logging.getLogger(__name__)
+                logger.error(f"Erreur d'envoi d'e-mail: {str(e)}")
+
+    return JsonResponse(response_data)
+
+# def update_password(request, token, uid):
+#     try:
+#         user_id = urlsafe_base64_decode(uid)
+#         decode_uid = codecs.decode(user_id, "utf-8")
+#         user = Utilisateur.objects.get(id=decode_uid)
+#     except:
+#         return HttpResponseForbidden(
+#             "Vous n'aviez pas la permission de modifier ce mot de pass. Utilisateur introuvable"
+#         )
+#
+#     check_token = default_token_generator.check_token(user, token)
+#     if not check_token:
+#         return HttpResponseForbidden(
+#             "Vous n'aviez pas la permission de modifier ce mot de pass. Votre Token est invalid ou a espiré"
+#         )
+#
+#     error = False
+#     success = False
+#     message = ""
+#     if request.method == "POST":
+#         password = request.POST.get("password")
+#         repassword = request.POST.get("repassword")
+#
+#         if repassword == password:
+#             try:
+#                 validate_password(password, user)
+#                 user.set_password(password)
+#                 user.save()
+#
+#                 success = True
+#                 message = "votre mot de pass a été modifié avec succès!"
+#             except ValidationError as e:
+#                 error = True
+#                 message = str(e)
+#         else:
+#             error = True
+#             message = "Les deux mot de pass ne correspondent pas"
+#
+#     context = {"error": error, "success": success, "message": message}
+#
+#     return render(request, "update_password.html", context)
+
+def update_password(request, token, uid):
+    try:
+        user_id = urlsafe_base64_decode(uid)
+        decode_uid = user_id.decode("utf-8")  # Convertir le byte en string
+        user = Utilisateur.objects.get(id=decode_uid)
+    except:
+        return HttpResponseForbidden(
+            "Vous n'avez pas la permission de modifier ce mot de passe. Utilisateur introuvable."
+        )
+
+    check_token = default_token_generator.check_token(user, token)
+    if not check_token:
+        return HttpResponseForbidden(
+            "Vous n'avez pas la permission de modifier ce mot de passe. Votre token est invalide ou a expiré."
+        )
+
+    error = False
+    success = False
+    message = ""
+
+    if request.method == "POST":
+        password = request.POST.get("password")
+        repassword = request.POST.get("repassword")
+
+        if repassword == password:
+            if len(password) >= 6:  # Vérification de la longueur
+                try:
+                    user.set_password(password)
+                    user.save()
+                    success = True
+                    message = "Votre mot de passe a été modifié avec succès !"
+                except Exception as e:
+                    error = True
+                    message = f"Une erreur s'est produite : {str(e)}"
+            else:
+                error = True
+                message = "Le mot de passe doit contenir au moins 6 caractères."
+        else:
+            error = True
+            message = "Les deux mots de passe ne correspondent pas."
+
+    context = {"error": error, "success": success, "message": message}
+
+    return render(request, "update_password.html", context)
+
+
+def deconnxion(request):
+    logout(request)
+
+    response_data = {'message': 'Vous ete deconnecter', 'etat': True}
+    return JsonResponse(response_data)
