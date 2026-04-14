@@ -20,29 +20,6 @@ class RegisterView(APIView):
             try:
                 user = serializer.save()
 
-                # Préparer l'email
-                html_text = render_to_string('mail.html', {
-                    "sujet": "Inscription reçue sur Gest Stocks (Gestion de Stock)",
-                    "message": (
-                        f"Bonjour <b>{user.first_name} {user.last_name}</b>,<br><br>"
-                        "🎉 <b>Félicitations !</b> Votre inscription a bien été enregistrée.<br><br>"
-                        "Merci d'avoir choisi <b>Gest Stocks</b> pour la gestion de vos stocks.<br><br>"
-                        f"🔐 <b>Votre nom d'utilisateur est :</b> <b>{user.username}</b><br><br>"
-                        "À très bientôt sur notre plateforme !<br><br>"
-                        "— L’équipe Diakite Digital"
-                    )
-                })
-
-                email_sent = send(
-                    sujet="Inscription reçue sur Gest Stocks (Gestion de Stock)",
-                    message="",
-                    email_liste=[user.email],
-                    html_message=html_text,
-                )
-
-                if not email_sent:
-                    return Response({"etat": False, "message": "Utilisateur créé mais échec d'envoi d'email."}, status=201)
-
                 return Response({"etat": True, "message": "Utilisateur créé avec succès", "id": user.id}, status=201)
 
             except Exception as e:
@@ -51,13 +28,36 @@ class RegisterView(APIView):
 
 
 class CustomTokenObtainPairView(TokenObtainPairView):
-    serializer_class = CustomTokenObtainPairSerializer
+    permission_classes = [AllowAny]
 
-    def post(self, request, *args, **kwargs):
-        try:
-            return super().post(request, *args, **kwargs)
-        except Exception as e:
-            return Response({"etat": False, "message": str("Nom d'utilisateur ou mot de passe incorrect.")})
+    def post(self, request):
+
+        serializer = CustomTokenObtainPairSerializer(data=request.data)
+        if serializer.is_valid():
+            try:
+
+                data = serializer.validated_data
+                return Response(
+                    {
+                        "etat": True,
+                        "message": "Connexion réussie",
+                        **data,
+                    },
+                    status=status.HTTP_200_OK,
+                )
+            except Exception as e:
+                return Response({"etat": False, "message": str(e)}, status=500)
+        return Response({"etat": False, "message": serializer.errors}, status=400)
+
+        # data = serializer.validated_data
+        # return Response(
+        #     {
+        #         "etat": True,
+        #         "message": "Connexion réussie",
+        #         **data,
+        #     },
+        #     status=status.HTTP_200_OK,
+        # )
 
 
 class UserProfileView(APIView):
@@ -71,7 +71,6 @@ class UserProfileView(APIView):
             "uuid": user.uuid,
             "id": user.id,
             "email": user.email,
-            "email_user": getattr(user, "email_user", None),
             "role": user.role,
             "numero": user.numero,
             "pays": getattr(user, "pays", None),
@@ -98,7 +97,6 @@ class UserUnView(APIView):
             "first_name": user.first_name,
             "uuid": user.uuid,
             "email": user.email,
-            "email_user": getattr(user, "email_user", None),
             "role": user.role,
             "numero": user.numero,
             "pays": getattr(user, "pays", None),

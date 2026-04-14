@@ -334,7 +334,7 @@ class UserAdminRegisterView(APIView):
 
         form = request.data  # DRF gère déjà JSON
 
-        required_fields = ["password", "first_name", "last_name", "email_user", "entreprise_id"]
+        required_fields = ["password", "first_name", "last_name", "email", "entreprise_id"]
         if not all(field in form for field in required_fields):
             return Response(response_data)
 
@@ -343,7 +343,7 @@ class UserAdminRegisterView(APIView):
         numero = form.get("numero")
         role = form.get("role")
         last_name = form.get("last_name")
-        email_user = form.get("email_user")
+        email_user = form.get("email")
         entreprise_id = form.get("entreprise_id")
 
         admin_user = request.user
@@ -359,7 +359,7 @@ class UserAdminRegisterView(APIView):
             response_data["message"] = "Entreprise non sélectionnée ou inexistante"
             return Response(response_data)
 
-        if Utilisateur.objects.filter(email_user=email_user).exists():
+        if Utilisateur.objects.filter(email=email_user).exists():
             response_data["message"] = "Cet email est déjà utilisé"
             return Response(response_data)
 
@@ -373,26 +373,6 @@ class UserAdminRegisterView(APIView):
 
         try:
             # Préparation e-mail
-            html_text = render_to_string('mail.html', context={
-                "sujet": "Inscription reçue sur Gest Stocks (Gestion de Stock)",
-                "message": (
-                    f"Bonjour <b>{first_name} {last_name}</b>,<br><br>"
-                    "🎉 <b>Félicitations !</b> Votre inscription a bien été enregistrée.<br><br>"
-                    f"🔐 <b>Votre nom d'utilisateur est :</b> <b>{username}</b><br><br>"
-                    "— L’équipe Diakite Digital"
-                )
-            })
-
-            email_sent = send(
-                sujet="Inscription reçue chez Diakite Digital",
-                message="",
-                email_liste=[request.user.email],
-                html_message=html_text,
-            )
-
-            if not email_sent:
-                response_data["message"] = "Échec de l'envoi de l'e-mail."
-                return Response(response_data)
 
             # Création de l’utilisateur
             new_user = Utilisateur.objects.create_user(
@@ -401,7 +381,7 @@ class UserAdminRegisterView(APIView):
                 username=username,
                 numero=numero,
                 role=role,
-                email_user=email_user,
+                email=email_user,
                 password=password,
                 created_by=admin_user
             )
@@ -1165,7 +1145,6 @@ def api_user_get(request):
                                 "first_name": c.first_name,
                                 "last_name": c.last_name,
                                 "email": c.email,
-                                "email_user": c.email_user,
                                 "is_admin": c.is_admin,
                                 "is_superuser": c.is_superuser,
                                 "numero": c.numero,

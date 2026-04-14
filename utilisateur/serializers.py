@@ -37,7 +37,7 @@ class RegisterSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = Utilisateur
-        fields = ["first_name", "last_name", "email", "numero", "pays", "password"]
+        fields = ["first_name", "last_name", "email", "numero", "password"]
 
     def validate_email(self, value):
         if Utilisateur.objects.filter(email=value).exists():
@@ -48,11 +48,6 @@ class RegisterSerializer(serializers.ModelSerializer):
         if Utilisateur.objects.filter(numero=value).exists():
             raise serializers.ValidationError("Ce numéro est déjà utilisé.")
         return value
-
-    # def validate(self, attrs):
-    #     if attrs["password"] != attrs["confirm_password"]:
-    #         raise serializers.ValidationError({"confirm_password": "Les mots de passe ne correspondent pas."})
-    #     return attrs
 
     def create(self, validated_data):
         # validated_data.pop("confirm_password")
@@ -66,6 +61,10 @@ class RegisterSerializer(serializers.ModelSerializer):
             username = f"{validated_data['first_name'][:2].lower()}{counter:04d}{validated_data['last_name'][:2].lower()}"
 
         validated_data["username"] = username
+
+        # Forcer le rôle et le type de rôle pour tous les nouveaux comptes
+        validated_data["role"] = Utilisateur.ADMIN
+        validated_data["typeRole"] = Utilisateur.Premium
 
         # Création de l'utilisateur
         user = Utilisateur.objects.create_user(**validated_data)
@@ -82,7 +81,7 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
 
         # On cherche par username OU par numero
         try:
-            user_obj = Utilisateur.objects.filter(username=login_input).first() \
+            user_obj = Utilisateur.objects.filter(email=login_input).first() \
                        or Utilisateur.objects.filter(numero=login_input).first()
         except Utilisateur.DoesNotExist:
             user_obj = None

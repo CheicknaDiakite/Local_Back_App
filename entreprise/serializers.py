@@ -6,7 +6,8 @@ from utilisateur.models import Licence, Utilisateur
 from .models import Categorie, Entreprise, Depense, Sortie, Client, SousCategorie, Entrer, Facture
 
 
-class EntrepriseSerializer(serializers.ModelSerializer):
+class \
+        EntrepriseSerializer(serializers.ModelSerializer):
     # user_id = serializers.UUIDField(write_only=True)
     type_licence = serializers.IntegerField(write_only=True, default=1)
 
@@ -15,7 +16,7 @@ class EntrepriseSerializer(serializers.ModelSerializer):
         fields = ["id", "nom", "adresse", "numero", "email", "libelle", "type_licence"]
 
     def create(self, validated_data):
-        # On ignore le type_licence envoyé par le client, on le définit selon le typeRole de l'utilisateur
+        # On ignore le type_licence envoyé par le client : licence automatique de 3 ans
         validated_data.pop("type_licence", None)
         
         request = self.context.get("request")
@@ -24,23 +25,13 @@ class EntrepriseSerializer(serializers.ModelSerializer):
         if not user or not user.is_authenticated:
             raise serializers.ValidationError("Utilisateur non authentifié.")
 
-        # Déterminer le type de licence selon le typeRole de l'utilisateur
-        # Simple/1 -> FREE/1, Basic/2 -> BASIC/2, Premium/3 -> PREMIUM/3
-        type_licence = user.typeRole if user.typeRole in [1, 2, 3] else 1
+        # Limiter l'utilisateur à une seule entreprise
+        if user.entreprises.count() >= 1:
+            raise serializers.ValidationError("Vous ne pouvez créer qu'une seule entreprise.")
 
-        # Vérifier le nombre d’entreprises max
-        if user.entreprises.count() >= 10:
-            raise serializers.ValidationError("Vous possédez déjà plus de 10 entreprises.")
-
-        # Calcul de la date d’expiration de la licence
-        if type_licence == 1: # FREE
-            date_expiration = datetime.now().date() + timedelta(days=7)
-        elif type_licence == 2: # BASIC
-            date_expiration = datetime.now().date() + timedelta(days=180)
-        elif type_licence == 3: # PREMIUM
-            date_expiration = datetime.now().date() + timedelta(days=365)
-        else:
-            raise serializers.ValidationError("Type de licence invalide.")
+        # Licence automatique Premium de 3 ans
+        type_licence = 3
+        date_expiration = datetime.now().date() + timedelta(days=365 * 3)
 
         licence = Licence.objects.create(type=type_licence, date_expiration=date_expiration)
 

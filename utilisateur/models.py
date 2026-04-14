@@ -45,15 +45,15 @@ class Utilisateur(AbstractUser):
     is_admin = models.BooleanField(default=False)
     is_cabinet = models.BooleanField(default=False)
 
-    email_user = models.EmailField(blank=True, null=True)
-
-    role = models.PositiveSmallIntegerField(choices=choice, null=True, blank=True)
-    typeRole = models.PositiveSmallIntegerField(choices=choiceTypeRole, default=Basic)
-
-    # boutiques = models.ManyToManyField('Boutique', related_name='utilisateurs',
-    #                                    blank=True)  # Relation optionnelle
+    role = models.PositiveSmallIntegerField(choices=choice, default=ADMIN, null=True, blank=True)
+    typeRole = models.PositiveSmallIntegerField(choices=choiceTypeRole, default=Premium)
 
     def save(self, *args, **kwargs):
+        if self._state.adding:
+            if self.role is None:
+                self.role = self.ADMIN
+            if self.typeRole is None:
+                self.typeRole = self.Premium
 
         # CREATION / RECUPERATION DES GROUPS
         admin_group, create_ad = Group.objects.get_or_create(name="Admin")
@@ -119,41 +119,35 @@ class Utilisateur(AbstractUser):
                 self.is_staff = True
                 self.is_admin = True
                 self.is_active = True
-
-                self.groups.add(admin_group)
-
-                return super().save(*args, **kwargs)
             case self.EDITOR:
                 self.is_staff = True
                 self.is_superuser = False
                 self.is_admin = False
                 self.is_active = True
-
-                self.groups.add(editor_group)
-
-                return super().save(*args, **kwargs)
             case self.AUTHOR:
                 self.is_staff = True
                 self.is_superuser = False
                 self.is_admin = False
                 self.is_active = True
-
-                self.groups.add(author_group)
-
-                return super().save(*args, **kwargs)
             case self.VISITOR:
                 self.is_staff = False
                 self.is_superuser = False
                 self.is_admin = False
                 self.is_active = True
 
+        super().save(*args, **kwargs)
+
+        match self.role:
+            case self.ADMIN:
+                self.groups.add(admin_group)
+            case self.EDITOR:
+                self.groups.add(editor_group)
+            case self.AUTHOR:
+                self.groups.add(author_group)
+            case self.VISITOR:
                 self.groups.add(visitor_group)
 
-                return super().save(*args, **kwargs)
-            case _:
-                return super().save(*args, **kwargs)
-
-        pass
+        return self
 
 
 class RoleRestriction(models.Model):

@@ -154,16 +154,16 @@ CORS_ALLOW_HEADERS = [
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 # 'NAME': "digitalentreprise",
-if True:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.mysql',
-            'NAME': "der",
-            'USER': "root",
-            'PASSWORD': "",
-            'HOST': 'localhost',
-            'PORT': '3306',
-        }
+# if True:
+#     DATABASES = {
+#         'default': {
+#             'ENGINE': 'django.db.backends.mysql',
+#             'NAME': "test",
+#             'USER': "root",
+#             'PASSWORD': "",
+#             'HOST': 'localhost',
+#             'PORT': '3306',
+#         }
 
         # Pour gest-stocks.com
         # 'default': {
@@ -184,14 +184,14 @@ if True:
         #     'HOST': 'localhost',
         #     'PORT': '3306',
         # }
+    # }
+# else:
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': os.environ.get('DJANGO_DB_PATH', BASE_DIR / 'db.sqlite3'),
     }
-else:
-    DATABASES = {
-        'default': {
-            'ENGINE': 'django.db.backends.sqlite3',
-            'NAME': BASE_DIR / 'db.sqlite3',
-        }
-    }
+}
 
 
 # Password validation
