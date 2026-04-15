@@ -13,6 +13,7 @@ if errorlevel 1 (
 
 REM Construire l'exécutable et inclure les dossiers templates/static/media
 pyinstaller --clean --onefile --name digital_back_exe ^
+  --icon "static\dist\C_D.ico" ^
   --hidden-import "rest_framework_simplejwt.state" ^
   --add-data "root\templates;root\templates" ^
   --add-data "static;static" ^

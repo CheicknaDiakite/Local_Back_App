@@ -16,17 +16,19 @@ Including another URLconf
 """
 from django.conf.urls.static import static
 from django.contrib import admin
-from django.urls import path, include
+from django.urls import path, include, re_path
 
 from root import settings
 from . import views
 
 urlpatterns = [
-    path('', views.index, name='index'),
     path('admin/', admin.site.urls),
 
     path('api/entreprise/', include("entreprise.urls")),
     path('api/utilisateur/', include("utilisateur.urls")),
+
+    # Catch-all pour le frontend React (SPA)
+    re_path(r'^.*$', views.index, name='index'),
 ]
 if settings.DEBUG:
     urlpatterns += static(settings.STATIC_URL, document_root=settings.STATIC_ROOT) + static(settings.MEDIA_URL,
