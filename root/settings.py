@@ -165,25 +165,6 @@ CORS_ALLOW_HEADERS = [
 #             'PORT': '3306',
 #         }
 
-        # Pour gest-stocks.com
-        # 'default': {
-        #     'ENGINE': 'django.db.backends.mysql',
-        #     'NAME': "sc1dich5095_der",
-        #     'USER': "sc1dich5095_deruser",
-        #     'PASSWORD': "Bonjour@10",
-        #     'HOST': 'localhost',
-        #     'PORT': '3306',
-        # }
-
-        # Pour le back.diakitedigital.com
-        # 'default': {
-        #     'ENGINE': 'django.db.backends.mysql',
-        #     'NAME': "dich5095_ok",
-        #     'USER': "dich5095_okuser",
-        #     'PASSWORD': "Bonjour@10",
-        #     'HOST': 'localhost',
-        #     'PORT': '3306',
-        # }
     # }
 # else:
 DATABASES = {
