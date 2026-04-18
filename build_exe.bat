@@ -12,7 +12,7 @@ if errorlevel 1 (
 )
 
 REM Construire l'exécutable et inclure les dossiers templates/static/media
-pyinstaller --clean --onefile --name digital_back_exe ^
+pyinstaller --clean --onefile --name gest_stoks ^
   --icon "static\dist\C_D.ico" ^
   --hidden-import "rest_framework_simplejwt.state" ^
   --add-data "root\templates;root\templates" ^
@@ -28,7 +28,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo Build termine : dist\digital_back_exe.exe
-echo Pour lancer le serveur : dist\digital_back_exe.exe runserver 0.0.0.0:8000
+echo Build termine : dist\gest_stoks.exe
+echo Pour lancer le serveur : dist\gest_stoks.exe runserver 0.0.0.0:8000
 echo (le reloader est desactive automatiquement dans l'executable)
 pause
